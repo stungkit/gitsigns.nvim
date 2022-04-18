@@ -240,11 +240,17 @@ M.stage_hunk = mk_repeatable(void(function(range)
       hunk = get_cursor_hunk(bufnr, bcache.hunks)
    end
 
+   local invert = false
+   if not hunk then
+      invert = true
+      hunk = get_cursor_hunk(bufnr, bcache.hunks_staged)
+   end
+
    if not hunk then
       return
    end
 
-   bcache.git_obj:stage_hunks({ hunk })
+   bcache.git_obj:stage_hunks({ hunk }, invert)
 
    table.insert(bcache.staged_diffs, hunk)
 

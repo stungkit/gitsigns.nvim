@@ -29,7 +29,8 @@ local config = require('gitsigns.config').config
 local api = vim.api
 local uv = vim.loop
 
-local signs
+local signs_normal
+local signs_staged
 
 local M = {}
 
@@ -52,11 +53,10 @@ end
 
 local scheduler_if_buf_valid = awrap(schedule_if_buf_valid, 2)
 
-local function apply_win_signs(bufnr, hunks, top, bot, clear)
+local function apply_signs0(bufnr, signs, hunks, top, bot, clear)
    if clear then
       signs:remove(bufnr)
    end
-
 
 
 
@@ -73,6 +73,15 @@ local function apply_win_signs(bufnr, hunks, top, bot, clear)
    end
 end
 
+local function apply_signs(bufnr, top, bot, clear)
+   local bcache = cache[bufnr]
+   if not bcache then
+      return
+   end
+   apply_signs0(bufnr, signs_normal, bcache.hunks, top, bot, clear)
+   apply_signs0(bufnr, signs_staged, bcache.hunks_staged, top, bot, clear)
+end
+
 M.on_lines = function(buf, first, last_orig, last_new)
    local bcache = cache[buf]
    if not bcache then
@@ -80,14 +89,22 @@ M.on_lines = function(buf, first, last_orig, last_new)
       return true
    end
 
-   signs:on_lines(buf, first, last_orig, last_new)
+   signs_normal:on_lines(buf, first, last_orig, last_new)
+   signs_staged:on_lines(buf, first, last_orig, last_new)
 
 
 
-   if bcache.hunks and signs:contains(buf, first, last_new) then
+   if bcache.hunks and signs_normal:contains(buf, first, last_new) then
 
 
       bcache.hunks = nil
+   end
+
+
+
+   if bcache.hunks_staged and signs_staged:contains(buf, first, last_new) then
+
+      bcache.hunks_staged = nil
    end
 
    M.update_debounced(buf, cache[buf])
@@ -96,7 +113,8 @@ end
 local ns = api.nvim_create_namespace('gitsigns')
 
 local function apply_word_diff(bufnr, row)
-   if not cache[bufnr] or not cache[bufnr].hunks then
+   local bcache = cache[bufnr]
+   if not bcache or not bcache.hunks then
       return
    end
 
@@ -108,7 +126,7 @@ local function apply_word_diff(bufnr, row)
 
    local lnum = row + 1
 
-   local hunk = gs_hunks.find_hunk(lnum, cache[bufnr].hunks)
+   local hunk = gs_hunks.find_hunk(lnum, bcache.hunks)
    if not hunk then
 
       return
@@ -224,8 +242,8 @@ M.update = throttle_by_id(function(bufnr, bcache)
       eprint('Cache for buffer ' .. bufnr .. ' was nil')
       return
    end
-   local old_hunks = bcache.hunks
-   bcache.hunks = nil
+   local old_hunks, old_hunks_staged = bcache.hunks, bcache.hunks_staged
+   bcache.hunks, bcache.hunks_staged = nil, nil
 
    scheduler_if_buf_valid(bufnr)
    local buftext = util.buf_lines(bufnr)
@@ -237,14 +255,24 @@ M.update = throttle_by_id(function(bufnr, bcache)
 
    bcache.hunks = run_diff(bcache.compare_text, buftext)
 
+   if config.signs_staged_enable then
+      if not bcache.compare_text_head or config._refresh_staged_on_update then
+         bcache.compare_text_head = git_obj:get_show_text('HEAD')
+      end
+      local hunks_head = run_diff(bcache.compare_text_head, buftext)
+      bcache.hunks_staged = gs_hunks.filter_common(hunks_head, bcache.hunks)
+   end
+
    scheduler_if_buf_valid(bufnr)
-   if gs_hunks.compare_heads(bcache.hunks, old_hunks) then
+   if gs_hunks.compare_heads(bcache.hunks, old_hunks) or
+      gs_hunks.compare_heads(bcache.hunks_staged, old_hunks_staged) then
 
 
-      apply_win_signs(bufnr, bcache.hunks, vim.fn.line('w0'), vim.fn.line('w$'), true)
+      apply_signs(bufnr, vim.fn.line('w0'), vim.fn.line('w$'), true)
 
       show_deleted(bufnr)
    end
+
    local summary = gs_hunks.get_summary(bcache.hunks)
    summary.head = git_obj.repo.abbrev_head
    Status:update(bufnr, summary)
@@ -256,7 +284,9 @@ end)
 
 M.detach = function(bufnr, keep_signs)
    if not keep_signs then
-      signs:remove(bufnr)
+
+      signs_normal:remove(bufnr)
+      signs_staged:remove(bufnr)
    end
 end
 
@@ -325,10 +355,7 @@ M.watch_gitdir = function(bufnr, gitdir)
       local was_tracked = git_obj.object_name ~= nil
       local old_relpath = git_obj.relpath
 
-      if not git_obj:update_file_info() then
-         dprint('File not changed')
-         return
-      end
+      git_obj:update_file_info()
 
       if config.watch_gitdir.follow_files and was_tracked and not git_obj.object_name then
 
@@ -336,8 +363,7 @@ M.watch_gitdir = function(bufnr, gitdir)
          handle_moved(bufnr, bcache, old_relpath)
       end
 
-
-      bcache.compare_text = nil
+      bcache:invalidate()
 
       M.update(bufnr, bcache)
    end))
@@ -412,7 +438,9 @@ M.update_cwd_head = void(function()
 end)
 
 M.reset_signs = function()
-   signs:reset()
+
+   signs_normal:reset()
+   signs_staged:reset()
 end
 
 M.setup = function()
@@ -424,7 +452,7 @@ M.setup = function()
          if not bcache or not bcache.hunks then
             return false
          end
-         apply_win_signs(bufnr, bcache.hunks, top + 1, bot + 1)
+         apply_signs(bufnr, top + 1, bot + 1)
 
          if not (config.word_diff and config.diff_opts.internal) then
             return false
@@ -435,7 +463,9 @@ M.setup = function()
       end,
    })
 
-   signs = Signs.new(config.signs)
+   signs_normal = Signs.new(config.signs)
+   signs_staged = Signs.new(config.signs_staged, 'staged')
+
    M.update_debounced = debounce_trailing(config.update_debounce, void(M.update))
 end
 

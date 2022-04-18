@@ -29,7 +29,8 @@ local config            = require('gitsigns.config').config
 local api = vim.api
 local uv = vim.loop
 
-local signs: Signs
+local signs_normal: Signs
+local signs_staged: Signs
 
 local record M
   update           : function(integer, CacheEntry, boolean)
@@ -52,25 +53,33 @@ end
 
 local scheduler_if_buf_valid = awrap(schedule_if_buf_valid, 2)
 
-local function apply_win_signs(bufnr: integer, hunks: {Hunk}, top: integer, bot: integer, clear: boolean)
-  if clear then
-    signs:remove(bufnr)  -- Remove all signs
-  end
-
-  -- To stop the sign column width changing too much, if there are signs to be
-  -- added but none of them are visible in the window, then make sure to add at
-  -- least one sign. Only do this on the first call after an update when we all
-  -- the signs have been cleared.
-
-  for i, hunk in ipairs(hunks or {}) do
-    if clear and i == 1
-        or top <= hunk.vend and bot >= hunk.added.start then
-      signs:add(bufnr, gs_hunks.calc_signs(hunk, top, bot))
+local function apply_signs0(bufnr: integer, signs: Signs, hunks: {Hunk}, top: integer, bot: integer, clear: boolean)
+    if clear then
+      signs:remove(bufnr)  -- Remove all signs
     end
-    if hunk.added.start > bot then
-      break
+
+    -- To stop the sign column width changing too much, if there are signs to be
+    -- added but none of them are visible in the window, then make sure to add at
+    -- least one sign. Only do this on the first call after an update when we all
+    -- the signs have been cleared.
+    for i, hunk in ipairs(hunks or {}) do
+      if clear and i == 1
+          or top <= hunk.vend and bot >= hunk.added.start then
+        signs:add(bufnr, gs_hunks.calc_signs(hunk, top, bot))
+      end
+      if hunk.added.start > bot then
+        break
+      end
     end
+end
+
+local function apply_signs(bufnr: integer, top: integer, bot: integer, clear: boolean)
+  local bcache = cache[bufnr]
+  if not bcache then
+    return
   end
+  apply_signs0(bufnr, signs_normal, bcache.hunks       , top, bot, clear)
+  apply_signs0(bufnr, signs_staged, bcache.hunks_staged, top, bot, clear)
 end
 
 M.on_lines = function(buf: integer, first: integer, last_orig: integer, last_new: integer): boolean
@@ -80,14 +89,22 @@ M.on_lines = function(buf: integer, first: integer, last_orig: integer, last_new
     return true
   end
 
-  signs:on_lines(buf, first, last_orig, last_new)
+  signs_normal:on_lines(buf, first, last_orig, last_new)
+  signs_staged:on_lines(buf, first, last_orig, last_new)
 
   -- Signs in changed regions get invalidated so we need to force a redraw if
   -- any signs get removed.
-  if bcache.hunks and signs:contains(buf, first, last_new) then
+  if bcache.hunks and signs_normal:contains(buf, first, last_new) then
     -- invalidate hunks to force a sign redraw
     -- TODO(lewis6991): Force redraw without having to re-diff
     bcache.hunks = nil
+  end
+
+  -- Signs in changed regions get invalidated so we need to force a redraw if
+  -- any signs get removed.
+  if bcache.hunks_staged and signs_staged:contains(buf, first, last_new) then
+    -- invalidate hunks to force a sign redraw
+    bcache.hunks_staged = nil
   end
 
   M.update_debounced(buf, cache[buf])
@@ -96,7 +113,8 @@ end
 local ns = api.nvim_create_namespace('gitsigns')
 
 local function apply_word_diff(bufnr: integer, row: integer)
-  if not cache[bufnr] or not cache[bufnr].hunks then
+  local bcache = cache[bufnr]
+  if not bcache or not bcache.hunks then
     return
   end
 
@@ -108,7 +126,7 @@ local function apply_word_diff(bufnr: integer, row: integer)
 
   local lnum = row + 1
 
-  local hunk = gs_hunks.find_hunk(lnum, cache[bufnr].hunks)
+  local hunk = gs_hunks.find_hunk(lnum, bcache.hunks)
   if not hunk then
     -- No hunk at line
     return
@@ -224,8 +242,8 @@ M.update = throttle_by_id(function(bufnr: integer, bcache: CacheEntry)
     eprint('Cache for buffer '..bufnr..' was nil')
     return
   end
-  local old_hunks = bcache.hunks
-  bcache.hunks = nil
+  local old_hunks, old_hunks_staged = bcache.hunks, bcache.hunks_staged
+  bcache.hunks, bcache.hunks_staged = nil, nil
 
   scheduler_if_buf_valid(bufnr)
   local buftext = util.buf_lines(bufnr)
@@ -237,14 +255,24 @@ M.update = throttle_by_id(function(bufnr: integer, bcache: CacheEntry)
 
   bcache.hunks = run_diff(bcache.compare_text, buftext)
 
+  if config.signs_staged_enable then
+    if not bcache.compare_text_head or config._refresh_staged_on_update then
+      bcache.compare_text_head = git_obj:get_show_text('HEAD')
+    end
+    local hunks_head = run_diff(bcache.compare_text_head, buftext)
+    bcache.hunks_staged = gs_hunks.filter_common(hunks_head, bcache.hunks)
+  end
+
   scheduler_if_buf_valid(bufnr)
-  if gs_hunks.compare_heads(bcache.hunks, old_hunks) then
+  if gs_hunks.compare_heads(bcache.hunks, old_hunks) or
+    gs_hunks.compare_heads(bcache.hunks_staged, old_hunks_staged) then
     -- Apply signs to the window. Other signs will be added by the decoration
     -- provider as they are drawn.
-    apply_win_signs(bufnr, bcache.hunks, vim.fn.line('w0'), vim.fn.line('w$'), true)
+    apply_signs(bufnr, vim.fn.line('w0'), vim.fn.line('w$'), true)
 
     show_deleted(bufnr)
   end
+
   local summary = gs_hunks.get_summary(bcache.hunks)
   summary.head = git_obj.repo.abbrev_head
   Status:update(bufnr, summary)
@@ -256,7 +284,9 @@ end)
 
 M.detach = function(bufnr: integer, keep_signs: boolean)
   if not keep_signs then
-    signs:remove(bufnr)  -- Remove all signs
+    -- Remove all signs
+    signs_normal:remove(bufnr)
+    signs_staged:remove(bufnr)
   end
 end
 
@@ -325,10 +355,7 @@ M.watch_gitdir = function(bufnr: integer, gitdir: string): uv.FSPollObj
     local was_tracked = git_obj.object_name ~= nil
     local old_relpath = git_obj.relpath
 
-    if not git_obj:update_file_info() then
-      dprint('File not changed')
-      return
-    end
+    git_obj:update_file_info()
 
     if config.watch_gitdir.follow_files and was_tracked and not git_obj.object_name then
       -- File was tracked but is no longer tracked. Must of been removed or
@@ -336,8 +363,7 @@ M.watch_gitdir = function(bufnr: integer, gitdir: string): uv.FSPollObj
       handle_moved(bufnr, bcache, old_relpath)
     end
 
-    -- Invalidate
-    bcache.compare_text = nil
+    bcache:invalidate()
 
     M.update(bufnr, bcache)
   end))
@@ -412,7 +438,9 @@ M.update_cwd_head = void(function()
 end)
 
 M.reset_signs = function()
-  signs:reset()  -- Remove all signs
+  -- Remove all signs
+  signs_normal:reset()
+  signs_staged:reset()
 end
 
 M.setup = function()
@@ -424,7 +452,7 @@ M.setup = function()
       if not bcache or not bcache.hunks then
         return false
       end
-      apply_win_signs(bufnr, bcache.hunks, top+1, bot+1)
+      apply_signs(bufnr, top+1, bot+1)
 
       if not (config.word_diff and config.diff_opts.internal) then
         return false
@@ -435,7 +463,9 @@ M.setup = function()
     end
   })
 
-  signs = Signs.new(config.signs)
+  signs_normal = Signs.new(config.signs)
+  signs_staged = Signs.new(config.signs_staged, 'staged')
+
   M.update_debounced = debounce_trailing(config.update_debounce, void(M.update)) as function(integer, CacheEntry)
 end
 

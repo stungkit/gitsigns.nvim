@@ -39,11 +39,9 @@ function M:add(bufnr, signs)
       return
    end
 
-   local cfg = self.config
-
    for _, s in ipairs(signs) do
       if not self:contains(bufnr, s.lnum) then
-         local cs = cfg[s.type]
+         local cs = self.config[s.type]
          local text = cs.text
          if config.signcolumn and cs.show_count and s.count then
             local count = s.count
@@ -52,6 +50,9 @@ function M:add(bufnr, signs)
             text = cs.text .. count_char
          end
 
+         vim.schedule(function()
+            print('DEBUG ' .. cs.hl)
+         end)
          api.nvim_buf_set_extmark(bufnr, self.ns, s.lnum - 1, -1, {
             id = s.lnum,
             sign_text = config.signcolumn and text or '',

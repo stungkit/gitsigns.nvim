@@ -115,6 +115,8 @@ local M = {Config = {DiffOpts = {}, SignConfig = {}, watch_gitdir = {}, current_
 
 
 
+
+
 M.config = {}
 
 M.schema = {
@@ -149,6 +151,34 @@ M.schema = {
 
       For example if `GitSignsAdd` is not defined but `GitGutterAdd` is defined,
       then `GitSignsAdd` will be linked to `GitGutterAdd`.
+    ]],
+   },
+
+   signs_staged = {
+      type = 'table',
+      deep_extend = true,
+      default = {
+         add = { hl = 'GitSignsStagedAdd', text = '┃', numhl = 'GitSignsStagedAddNr', linehl = 'GitSignsStagedAddLn' },
+         change = { hl = 'GitSignsStagedChange', text = '┃', numhl = 'GitSignsStagedChangeNr', linehl = 'GitSignsStagedChangeLn' },
+         delete = { hl = 'GitSignsStagedDelete', text = '▁', numhl = 'GitSignsStagedDeleteNr', linehl = 'GitSignsStagedDeleteLn' },
+         topdelete = { hl = 'GitSignsStagedDelete', text = '▔', numhl = 'GitSignsStagedDeleteNr', linehl = 'GitSignsStagedDeleteLn' },
+         changedelete = { hl = 'GitSignsStagedChange', text = '~', numhl = 'GitSignsStagedChangeNr', linehl = 'GitSignsStagedChangeLn' },
+      },
+      description = [[
+      Configuration for signs of staged hunks.
+
+      See |gitsigns-config-signs|.
+    ]],
+   },
+
+   signs_staged_enable = {
+      type = 'boolean',
+
+      default = true,
+      description = [[
+      Show signs for staged hunks.
+
+      When enabled the signs defined in |git-config-signs_staged|` are used.
     ]],
    },
 
